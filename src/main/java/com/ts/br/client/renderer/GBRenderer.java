@@ -22,7 +22,6 @@ public class GBRenderer extends EntityRenderer<GhostBlockEntity> {
     private static final ResourceLocation GEO_JSON = ResourceLocation.fromNamespaceAndPath("br", "geo/gb.geo.json");
     private static final ResourceLocation ANIM_JSON = ResourceLocation.fromNamespaceAndPath("br", "animations/gbca.animation.json");
 
-    // 骨架名稱直接注入 API
     public static final String BONE_CENTER_BLOCK = "bone6";
     public static final String BONE_FRAME = "bone7";
 
@@ -64,7 +63,6 @@ public class GBRenderer extends EntityRenderer<GhostBlockEntity> {
 
     @Override
     public void render(GhostBlockEntity entity, float entityYaw, float partialTick, PoseStack poseStack, MultiBufferSource bufferSource, int packedLight) {
-        // 消失型在未開始主階段前，地上是原版真方塊，實體靜默不渲染
         if (entity.getGhostType() == GhostType.DISAPPEAR && !entity.isMainAnimStarted()) {
             return;
         }
@@ -80,18 +78,18 @@ public class GBRenderer extends EntityRenderer<GhostBlockEntity> {
         float g = ((tint >> 8) & 0xFF) / 255.0F;
         float b = (tint & 0xFF) / 255.0F;
 
-        // 1. 外框骨骼渲染 (bone7)
+        // 1. 外框骨骼渲染
         VertexConsumer frameConsumer = bufferSource.getBuffer(RenderType.entityTranslucent(TEXTURE));
         BedrockAnimationAPI.renderAnimatedFrameByBone(
                 GEO_JSON, ANIM_JSON, animName, BONE_FRAME, animTime,
                 poseStack, frameConsumer, light, r, g, b, 1.0F
         );
 
-        // 2. 中央方塊渲染 (bone6)
-        // 完全不使用 stage 判定！直接由動畫 JSON 的 scale 決定顯示與縮放
+        // 2. 中央方塊渲染
         BlockState originalState = entity.getOriginalState();
         BedrockAnimationAPI.renderBlock(ANIM_JSON, animName, BONE_CENTER_BLOCK, animTime)
                 .at(entity.level(), entity.getTargetPos())
+                .withTileTag(entity.getOriginalTileTag()) // 傳入 NBT，箱子與界伏盒即刻可見！
                 .draw(poseStack, bufferSource, originalState, light);
 
         poseStack.popPose();

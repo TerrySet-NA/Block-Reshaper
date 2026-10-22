@@ -20,7 +20,7 @@ public class RestoreUpdateQueue {
     }
 
     /**
-     * 第二階段：所有方塊皆已放回世界後，在 Tick 尾端統一執行形狀重新連通與物理更新
+     * 在 ServerLevel Tick 尾端統一執行形狀重新連通與物理更新
      */
     public static void flush(ServerLevel level) {
         Set<BlockPos> positions = PENDING_UPDATES.remove(level);
@@ -38,10 +38,10 @@ public class RestoreUpdateQueue {
         for (BlockPos pos : positions) {
             BlockState state = level.getBlockState(pos);
 
-            // 1. 常規物理與紅石更新
+            // 常規物理與紅石更新
             level.updateNeighborsAt(pos, state.getBlock());
 
-            // 2. 統一形狀更新：通知四周 6 個方向的相鄰方塊（包含倖存沒被炸毀的階梯/柵欄等）
+            // 統一形狀更新：通知四周 6 個方向的相鄰方塊（讓階梯轉角、大箱子等重新咬合）
             for (Direction dir : Direction.values()) {
                 BlockPos neighborPos = pos.relative(dir);
                 BlockState neighborState = level.getBlockState(neighborPos);

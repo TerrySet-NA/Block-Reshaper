@@ -44,7 +44,10 @@ public abstract class EndermanTakeBlockMixin {
                 } else {
                     BlockState state = serverLevel.getBlockState(pos);
                     if (!state.isAir() && !ModBlockEvents.isNonRestorable(state)) {
-                        CompoundTag tileTag = ContainerHelper.captureAndClearBlockEntity(serverLevel, pos);
+                        // 修正：從 BlockDataSnapshot 提取 nbt
+                        ContainerHelper.BlockDataSnapshot snapshot = ContainerHelper.captureAndClearBlockEntity(serverLevel, pos);
+                        CompoundTag tileTag = snapshot != null ? snapshot.nbt() : null;
+
                         int restoreDelay = ModConfig.RESTORE_DELAY_TICKS.get();
                         GhostBlockEntity ghost = new GhostBlockEntity(serverLevel, pos, state, tileTag, restoreDelay, GhostType.RESTORE);
                         serverLevel.addFreshEntity(ghost);

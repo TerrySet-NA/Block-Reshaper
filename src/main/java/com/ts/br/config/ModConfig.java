@@ -2,6 +2,8 @@ package com.ts.br.config;
 
 import net.neoforged.neoforge.common.ModConfigSpec;
 
+import java.util.List;
+
 public class ModConfig {
 
     // ==================== COMMON (伺服端 / 邏輯規則) ====================
@@ -15,6 +17,9 @@ public class ModConfig {
     public static final ModConfigSpec.IntValue RESTORE_DELAY_TICKS;
     public static final ModConfigSpec.IntValue BUFFER_DELAY_TICKS;
     public static final ModConfigSpec.IntValue END_HOLD_TICKS;
+
+    // 不可還原黑名單（支援 ID 與 #Tag）
+    public static final ModConfigSpec.ConfigValue<List<? extends String>> NON_RESTORABLE_BLOCKS;
 
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
@@ -48,6 +53,10 @@ public class ModConfig {
                 .comment("Extra hold ticks after main animation completes before entity discard. Default: 3 ticks.")
                 .defineInRange("endHoldTicks", 3, 0, 40);
 
+        NON_RESTORABLE_BLOCKS = builder
+                .comment("List of blocks that should NEVER be restored (directly handled by vanilla). Supports block IDs ('minecraft:tnt') and tags ('#minecraft:beds').")
+                .defineListAllowEmpty("nonRestorableBlocks", List.of(), o -> o instanceof String);
+
         builder.pop();
         COMMON_SPEC = builder.build();
     }
@@ -61,7 +70,7 @@ public class ModConfig {
         builder.push("rendering");
 
         RENDER_DISTANCE_BLOCKS = builder
-                .comment("Client-only: Max visual render distance in blocks. Disables rendering beyond this distance to boost FPS. Default: 32.")
+                .comment("Client-only: Max visual render distance in blocks. Disables rendering beyond this distance to boost FPS. Default: 64.")
                 .defineInRange("renderDistanceBlocks", 64, 4, 512);
 
         builder.pop();

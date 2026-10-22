@@ -10,6 +10,7 @@ import com.ts.br.api.animation.internal.BlockTintRendererInternal;
 import com.ts.br.api.animation.internal.BonePoseImpl;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.BlockAndTintGetter;
@@ -31,9 +32,6 @@ public class BedrockAnimationAPI {
         return new BonePoseImpl();
     }
 
-    /**
-     * 骨骼姿態單獨求值
-     */
     public static void evaluateBone(ResourceLocation animationFile, String animationName, String boneName, float timeSeconds, IBonePose outPose) {
         if (!(outPose instanceof BonePoseImpl impl)) {
             throw new IllegalArgumentException("outPose must be created via BedrockAnimationAPI.createPoseHolder()");
@@ -51,9 +49,6 @@ public class BedrockAnimationAPI {
         channel.evalScales(clampedTime, impl.getScale());
     }
 
-    /**
-     * 外框幾何骨骼渲染
-     */
     public static void renderAnimatedFrameByBone(ResourceLocation geoFile, ResourceLocation animationFile, String animationName,
                                                 String frameBoneName, float timeSeconds, PoseStack poseStack,
                                                 com.mojang.blaze3d.vertex.VertexConsumer consumer, int light,
@@ -80,11 +75,6 @@ public class BedrockAnimationAPI {
         poseStack.popPose();
     }
 
-    // ==================== 核心：通用方塊渲染建造者 ====================
-
-    /**
-     * 啟動方塊渲染配置流（支援多載與選擇性鏈式呼叫）
-     */
     public static BlockRenderBuilder renderBlock(ResourceLocation animFile, String animName, String boneName, float timeSec) {
         return new BlockRenderBuilder(animFile, animName, boneName, timeSec);
     }
@@ -95,14 +85,15 @@ public class BedrockAnimationAPI {
         private final String boneName;
         private final float timeSec;
 
-        // 選擇性參數（帶有安全預設值）
+        // 選擇性參數
         private BlockAndTintGetter level = null;
         private BlockPos pos = BlockPos.ZERO;
+        private CompoundTag tileTag = null; // 支援方塊實體渲染的資料標籤
         private boolean useSeed = true;
         private boolean useBiomeTint = true;
         private boolean alignCenter = true;
         private boolean flipSouthNorth = false;
-        private int forcedColor = -1; // -1 表示使用生態域/原版預設，不強制覆蓋
+        private int forcedColor = -1;
 
         private BlockRenderBuilder(ResourceLocation animFile, String animName, String boneName, float timeSec) {
             this.animFile = animFile;
@@ -111,9 +102,6 @@ public class BedrockAnimationAPI {
             this.timeSec = timeSec;
         }
 
-        /**
-         * 選擇性傳入：世界環境與座標（用於計算隨機貼圖種子與生態域顏色）
-         */
         public BlockRenderBuilder at(BlockAndTintGetter level, BlockPos pos) {
             this.level = level;
             this.pos = pos;
@@ -121,41 +109,34 @@ public class BedrockAnimationAPI {
         }
 
         /**
-         * 選擇性設定：是否依座標套用隨機貼圖變體（預設 true）
+         * 選擇性傳入：方塊實體 NBT 資料（使箱子、界伏盒、床等特殊方塊能正確渲染模型與朝向）
          */
+        public BlockRenderBuilder withTileTag(CompoundTag tileTag) {
+            this.tileTag = tileTag;
+            return this;
+        }
+
         public BlockRenderBuilder useSeed(boolean enable) {
             this.useSeed = enable;
             return this;
         }
 
-        /**
-         * 選擇性設定：是否啟用生態域群系著色（預設 true）
-         */
         public BlockRenderBuilder useBiomeTint(boolean enable) {
             this.useBiomeTint = enable;
             return this;
         }
 
-        /**
-         * 選擇性設定：是否自動向中心對齊 (-0.5, -0.5, -0.5) 與翻轉 180 度（預設 true）
-         */
         public BlockRenderBuilder alignGrid(boolean center, boolean flip) {
             this.alignCenter = center;
             this.flipSouthNorth = flip;
             return this;
         }
 
-        /**
-         * 選擇性設定：強制覆蓋 RGB 染色（如地圖代表色 0xRRGGBB）
-         */
         public BlockRenderBuilder overrideColor(int rgb) {
             this.forcedColor = rgb;
             return this;
         }
 
-        /**
-         * 終結呼叫：執行繪製
-         */
         public void draw(PoseStack poseStack, MultiBufferSource bufferSource, BlockState state, int light) {
             if (state == null || state.isAir()) return;
 
@@ -172,33 +153,30 @@ public class BedrockAnimationAPI {
             Vector3f rot = pose.getRotation();
             Vector3f scale = pose.getScale();
 
-            // 1. 移動至方塊中心 (Y = 0.5) 並疊加骨骼動畫位移
+            // 1. 移動至中心
             poseStack.translate(bonePos.x / 16.0F, 0.5F + (bonePos.y / 16.0F), bonePos.z / 16.0F);
 
-            // 2. 套用 Blockbench 標準旋轉 (ZYX 順序)
-            // 注意：若動畫中 X 軸旋轉與預期相反，Blockbench 的 X 旋轉在 Minecraft 需保持負正對齊
+            // 2. 旋轉
             if (rot.z != 0.0F) poseStack.mulPose(com.mojang.math.Axis.ZP.rotationDegrees(rot.z));
             if (rot.y != 0.0F) poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(rot.y));
             if (rot.x != 0.0F) poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(rot.x));
 
-            // 3. 核心修正：移除原先強制寫死的 180 度翻轉！
-            // 只有當外部明確指定要翻轉時才翻轉，預設不翻轉以保持原版 BlockState 朝向
             if (this.flipSouthNorth) {
                 poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(180.0F));
             }
 
-            // 4. 縮放
+            // 3. 縮放
             poseStack.scale(scale.x, scale.y, scale.z);
 
-            // 5. 原版方塊以 (-0.5, -0.5, -0.5) 置中對齊
+            // 4. 置中原點 (-0.5, -0.5, -0.5)
             if (this.alignCenter) {
                 poseStack.translate(-0.5, -0.5, -0.5);
             }
 
-            // 6. 繪製方塊
+            // 5. 渲染
             BlockTintRendererInternal.render(
                     poseStack, bufferSource, state, this.level, this.pos,
-                    light, this.useSeed, this.useBiomeTint, this.forcedColor
+                    light, this.useSeed, this.useBiomeTint, this.forcedColor, this.tileTag
             );
 
             poseStack.popPose();

@@ -14,21 +14,17 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.Containers;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.RelativeMovement;
-import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.material.MapColor;
-import net.minecraft.world.level.storage.loot.LootParams;
-import net.minecraft.world.level.storage.loot.parameters.LootContextParams;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
@@ -41,7 +37,6 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
     public static final int BEGIN_TICKS = 15;     // 0.75s
     public static final int MAIN_ANIM_TICKS = 50; // 2.5s
 
-    // 階段常數定義
     public static final byte STAGE_BEGIN = 0;
     public static final byte STAGE_WAITING = 1;
     public static final byte STAGE_MAIN_ANIM = 2;
@@ -145,11 +140,10 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
         return this.level().getGameTime() >= this.getMainAnimStartTime();
     }
 
-    // ==================== 補齊渲染端與 API 缺少的方法 ====================
+    public CompoundTag getOriginalTileTag() { 
+        return this.originalTileTag; 
+    }
 
-    /**
-     * 依據世界時間計算當前所處階段
-     */
     public byte getStage() {
         if (this.isMainAnimStarted()) {
             return STAGE_MAIN_ANIM;
@@ -161,9 +155,6 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
         return STAGE_WAITING;
     }
 
-    /**
-     * 實作 IAnimatableState：動態取得當前動畫名稱
-     */
     @Override
     public String getCurrentAnimationName() {
         boolean isDisappear = (this.getGhostType() == GhostType.DISAPPEAR);
@@ -177,11 +168,9 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
     public float getAnimationTimeSeconds(float partialTick) {
         double now = (double) this.level().getGameTime() + (double) partialTick;
         if (this.isMainAnimStarted()) {
-            // 主階段 (gbca / gbca2): 0.0s ~ 2.5s
             double elapsed = (now - (double) this.getMainAnimStartTime()) / 20.0D;
             return (float) Math.min(2.5D, Math.max(0.0D, elapsed));
         } else {
-            // 開場階段 (begin / begin2): 0.0s ~ 0.75s
             double elapsed = (now - (double) this.getSpawnTime()) / 20.0D;
             return (float) Math.min(0.75D, Math.max(0.0D, elapsed));
         }
@@ -207,7 +196,6 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
 
     @Override
     public boolean shouldRenderAtSqrDistance(double distanceSqr) {
-        // 客戶端讀取 Client Config 設定的渲染距離
         int maxDist = 64;
         if (this.level().isClientSide()) {
             maxDist = ModConfig.RENDER_DISTANCE_BLOCKS.get();
@@ -267,45 +255,52 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
         }
     }
 
+    /**
+     * 原生置換還原管線（等同 /setblock <pos> <block> destroy）：
+     * 1. 若目標格被其他非空氣方塊佔據（被覆蓋/被佔位），直接原版 destroyBlock(pos, true) 破壞並掉落現場方塊。
+     * 2. 隨後原封不動放回原本的方塊並完整寫入資料，精妙背包與所有容器 100% 完美復原！
+     */
     private void handlePrePlace() {
         BlockPos pos = this.getTargetPos();
         Level level = this.level();
+        if (!(level instanceof ServerLevel serverLevel)) return;
+
         BlockState currentState = level.getBlockState(pos);
+        BlockState toRestore = this.getOriginalState();
 
-        if (currentState.canBeReplaced()) {
-            this.pushEntitiesOut(pos);
-
-            BlockState toRestore = this.getOriginalState();
-
-            if (toRestore.hasProperty(BlockStateProperties.WATERLOGGED)) {
-                boolean hasWater = currentState.getFluidState().is(Fluids.WATER);
-                toRestore = toRestore.setValue(BlockStateProperties.WATERLOGGED, hasWater || toRestore.getValue(BlockStateProperties.WATERLOGGED));
-            }
-
-            // 第一階段：完全靜默放回 (Flag 18 = UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE)
-            // 嚴禁在此時發送任何鄰近或形狀更新，確保所有方塊先在世界上就位
-            level.setBlock(pos, toRestore, 18);
-
-            // 還原方塊資料 (NBT)
-            if (this.originalTileTag != null) {
-                BlockEntity be = level.getBlockEntity(pos);
-                if (be != null) {
-                    be.loadWithComponents(this.originalTileTag, level.registryAccess());
-                    be.setChanged();
-                }
-            }
-
-            if (toRestore.hasProperty(BlockStateProperties.WATERLOGGED) && toRestore.getValue(BlockStateProperties.WATERLOGGED)) {
-                level.scheduleTick(pos, Fluids.WATER, Fluids.WATER.getTickDelay(level));
-            }
-
-            // 加入統一更新佇列，交給第二階段統一處理
-            if (level instanceof ServerLevel serverLevel) {
-                RestoreUpdateQueue.enqueue(serverLevel, pos);
-            }
-        } else {
-            this.dropAsItem(pos);
+        // 1. 如果現場不是空氣，且不是原本要放回的方塊（被玩家放了方塊或長出植物）
+        if (!currentState.isAir() && !currentState.equals(toRestore)) {
+            // 直接以原版標準邏輯打碎現場障礙方塊並掉落（如果是箱子/背包，原版會自己把肚子裡的東西吐出來）
+            serverLevel.destroyBlock(pos, true);
         }
+
+        // 2. 將周圍實體（玩家、生物）推出方塊碰撞範圍，防止窒息
+        this.pushEntitiesOut(pos);
+
+        // 3. 處理含水屬性狀態
+        if (toRestore.hasProperty(BlockStateProperties.WATERLOGGED)) {
+            boolean hasWater = level.getFluidState(pos).is(Fluids.WATER);
+            toRestore = toRestore.setValue(BlockStateProperties.WATERLOGGED, hasWater || toRestore.getValue(BlockStateProperties.WATERLOGGED));
+        }
+
+        // 4. 靜默放回原始方塊 (Flag 18 = UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE)
+        level.setBlock(pos, toRestore, 18);
+
+        // 5. 完整注入原本所有的方塊資料（NBT + 1.21 組件），精妙背包在這裡被完整喚醒！
+        if (this.originalTileTag != null) {
+            BlockEntity be = level.getBlockEntity(pos);
+            if (be != null) {
+                be.loadWithComponents(this.originalTileTag, level.registryAccess());
+                be.setChanged();
+            }
+        }
+
+        if (toRestore.hasProperty(BlockStateProperties.WATERLOGGED) && toRestore.getValue(BlockStateProperties.WATERLOGGED)) {
+            level.scheduleTick(pos, Fluids.WATER, Fluids.WATER.getTickDelay(level));
+        }
+
+        // 6. 排入 Tick 尾端統一連通更新（大箱子、階梯轉角等在此刻自動對齊）
+        RestoreUpdateQueue.enqueue(serverLevel, pos);
     }
 
     private void pushEntitiesOut(BlockPos pos) {
@@ -336,47 +331,6 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
                 );
                 entity.hurtMarked = true;
                 entity.hasImpulse = true;
-            }
-        }
-    }
-
-    private void dropAsItem(BlockPos pos) {
-        if (this.getGhostType() == GhostType.DISAPPEAR) return;
-        BlockState toRestore = this.getOriginalState();
-        if (toRestore.isAir()) return;
-
-        Level level = this.level();
-        if (!(level instanceof ServerLevel serverLevel)) return;
-
-        BlockEntity tempBe = null;
-        if (this.originalTileTag != null) {
-            tempBe = BlockEntity.loadStatic(pos, toRestore, this.originalTileTag, level.registryAccess());
-            if (tempBe instanceof net.minecraft.world.Container container) {
-                Containers.dropContents(level, pos, container);
-            }
-        }
-
-        LootParams.Builder params = new LootParams.Builder(serverLevel)
-                .withParameter(LootContextParams.ORIGIN, Vec3.atCenterOf(pos))
-                .withParameter(LootContextParams.TOOL, ItemStack.EMPTY);
-
-        if (tempBe != null) {
-            params.withOptionalParameter(LootContextParams.BLOCK_ENTITY, tempBe);
-        }
-
-        List<ItemStack> drops = toRestore.getDrops(params);
-        for (ItemStack dropStack : drops) {
-            if (!dropStack.isEmpty()) {
-                ItemEntity dropEntity = new ItemEntity(
-                        level,
-                        pos.getX() + 0.5,
-                        pos.getY() + 1.1,
-                        pos.getZ() + 0.5,
-                        dropStack
-                );
-                dropEntity.setDefaultPickUpDelay();
-                dropEntity.setDeltaMovement(0, 0.25, 0);
-                level.addFreshEntity(dropEntity);
             }
         }
     }
@@ -425,7 +379,8 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
         tag.putBoolean("HasRemovedForDisappear", this.hasRemovedForDisappear);
     }
 
-    // 傷害與傳送完全免疫
+    // ==================== 傷害、/kill、傳送完全鎖死 ====================
+
     @Override public boolean isInvulnerableTo(net.minecraft.world.damagesource.DamageSource source) { return true; }
     @Override public boolean isInvulnerable() { return true; }
     @Override public boolean hurt(net.minecraft.world.damagesource.DamageSource source, float amount) { return false; }
