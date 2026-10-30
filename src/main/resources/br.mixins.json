@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.ts.br.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "EndermanDeathMixin", 
+    "UniversalMonsterGriefMixin", 
+    "EndermanTakeBlockMixin", 
+    "EndermanFixPlaceMixin"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
