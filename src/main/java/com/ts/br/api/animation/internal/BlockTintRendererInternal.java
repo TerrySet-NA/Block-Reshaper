@@ -23,6 +23,7 @@ import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
 
@@ -36,42 +37,55 @@ public class BlockTintRendererInternal {
         BlockRenderDispatcher dispatcher = mc.getBlockRenderer();
         RenderShape renderShape = state.getRenderShape();
 
-        // 1. 純實體動畫方塊 (如普通箱子、界伏盒：無靜態模型)
-        if (renderShape == RenderShape.ENTITYBLOCK_ANIMATED) {
-            renderSpecialBlockEntity(poseStack, bufferSource, state, pos, packedLight, tileTag, mc);
-            return;
+        // 核心：還原花草、竹筍等植物的隨機自然模型偏移 (Model Offset)
+        poseStack.pushPose();
+        if (pos != null && level != null) {
+            Vec3 offset = state.getOffset(level, pos);
+            if (offset != Vec3.ZERO) {
+                poseStack.translate(offset.x, offset.y, offset.z);
+            }
         }
 
-        // 2. 繪製靜態模型層 (鐘的支架、一般石頭木板等)
-        if (renderShape == RenderShape.MODEL) {
-            BakedModel model = dispatcher.getBlockModel(state);
-            BlockColors blockColors = mc.getBlockColors();
+        try {
+            // 1. 純實體動畫方塊 (如普通箱子、界伏盒：無靜態模型)
+            if (renderShape == RenderShape.ENTITYBLOCK_ANIMATED) {
+                renderSpecialBlockEntity(poseStack, bufferSource, state, pos, packedLight, tileTag, mc);
+                return;
+            }
 
-            RenderType renderType = ItemBlockRenderTypes.getRenderType(state, false);
-            VertexConsumer consumer = bufferSource.getBuffer(renderType);
+            // 2. 繪製靜態模型層 (鐘的支架、一般石頭木板、草花植被等)
+            if (renderShape == RenderShape.MODEL) {
+                BakedModel model = dispatcher.getBlockModel(state);
+                BlockColors blockColors = mc.getBlockColors();
 
-            PoseStack.Pose entry = poseStack.last();
-            long seed = (useSeed && pos != null) ? state.getSeed(pos) : 42L;
-            RandomSource random = RandomSource.create(seed);
+                RenderType renderType = ItemBlockRenderTypes.getRenderType(state, false);
+                VertexConsumer consumer = bufferSource.getBuffer(renderType);
 
-            for (Direction direction : Direction.values()) {
+                PoseStack.Pose entry = poseStack.last();
+                long seed = (useSeed && pos != null) ? state.getSeed(pos) : 42L;
+                RandomSource random = RandomSource.create(seed);
+
+                for (Direction direction : Direction.values()) {
+                    random.setSeed(seed);
+                    List<BakedQuad> quads = model.getQuads(state, direction, random);
+                    if (!quads.isEmpty()) {
+                        renderQuads(entry, consumer, quads, state, level, pos, blockColors, packedLight, useBiomeTint, forcedColor);
+                    }
+                }
+
                 random.setSeed(seed);
-                List<BakedQuad> quads = model.getQuads(state, direction, random);
-                if (!quads.isEmpty()) {
-                    renderQuads(entry, consumer, quads, state, level, pos, blockColors, packedLight, useBiomeTint, forcedColor);
+                List<BakedQuad> unculled = model.getQuads(state, null, random);
+                if (!unculled.isEmpty()) {
+                    renderQuads(entry, consumer, unculled, state, level, pos, blockColors, packedLight, useBiomeTint, forcedColor);
                 }
             }
 
-            random.setSeed(seed);
-            List<BakedQuad> unculled = model.getQuads(state, null, random);
-            if (!unculled.isEmpty()) {
-                renderQuads(entry, consumer, unculled, state, level, pos, blockColors, packedLight, useBiomeTint, forcedColor);
+            // 3. 混合型方塊實體 (例如「鐘」：支架畫完了，追加繪製中間的動態鈴鐺)
+            if (state.getBlock() instanceof EntityBlock) {
+                renderSpecialBlockEntity(poseStack, bufferSource, state, pos, packedLight, tileTag, mc);
             }
-        }
-
-        // 3. 核心修復：混合型方塊實體 (例如「鐘」：支架畫完了，必須追加繪製中間的動態鈴鐺！)
-        if (state.getBlock() instanceof EntityBlock) {
-            renderSpecialBlockEntity(poseStack, bufferSource, state, pos, packedLight, tileTag, mc);
+        } finally {
+            poseStack.popPose();
         }
     }
 
@@ -95,7 +109,6 @@ public class BlockTintRendererInternal {
         }
 
         if (targetBe != null) {
-            // 核心設定：必須綁定 level 與 blockState，否則 BellRenderer 會直接放棄繪製！
             targetBe.setLevel(mc.level);
             
             BlockEntityRenderDispatcher beDispatcher = mc.getBlockEntityRenderDispatcher();

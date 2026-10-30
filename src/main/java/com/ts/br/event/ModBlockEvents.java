@@ -1,13 +1,15 @@
 package com.ts.br.event;
 
+import com.mojang.logging.LogUtils;
 import com.ts.br.BlockRestoreMod;
 import com.ts.br.block.GhostType;
 import com.ts.br.config.ModConfig;
 import com.ts.br.entity.GhostBlockEntity;
 import com.ts.br.util.ContainerHelper;
+import com.ts.br.util.EntityRestoreFilter;
 import com.ts.br.util.GhostBlockTracker;
+import com.ts.br.util.PendingPlacementTracker;
 import com.ts.br.util.RestoreUpdateQueue;
-
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -16,12 +18,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.Mob;
-import net.minecraft.world.entity.boss.enderdragon.EndCrystal;
-import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
 import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.entity.monster.Monster;
-import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.item.PrimedTnt;
 import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LiquidBlock;
@@ -35,31 +33,27 @@ import net.neoforged.neoforge.event.level.BlockDropsEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.ExplosionEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
+import org.slf4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
-@EventBusSubscriber(modid = BlockRestoreMod.MODID)
+@EventBusSubscriber(modid = BlockRestoreMod.MODID, bus = EventBusSubscriber.Bus.GAME)
 public class ModBlockEvents {
 
+    private static final Logger LOGGER = LogUtils.getLogger();
+
     public static boolean isNonRestorable(BlockState state) {
-        // 1. 空氣不還原
         if (state.isAir()) return true;
-
-        // 2. 純流體方塊不還原（但含水固體方塊如含水樓梯會正常還原）
         if (state.getBlock() instanceof LiquidBlock) return true;
-
-        // 3. 自身是可被覆蓋的脆弱方塊（草、花、雪層、火等）直接排除
         if (state.canBeReplaced()) return true;
 
-        // 4. 多格方塊結構抽象過濾（檢查通用半身/床部屬性，不硬編碼 Class）
         if (state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF) ||
             state.hasProperty(BlockStateProperties.BED_PART)) {
             return true;
         }
 
-        // 5. Config 自訂不可還原黑名單（支援 ID 與 #Tag）
         List<? extends String> blackList = ModConfig.NON_RESTORABLE_BLOCKS.get();
         if (!blackList.isEmpty()) {
             ResourceLocation blockKey = BuiltInRegistries.BLOCK.getKey(state.getBlock());
@@ -80,13 +74,45 @@ public class ModBlockEvents {
         return false;
     }
 
+    public static BlockState sanitizeStateForCapture(BlockState state) {
+        if (state.hasProperty(BlockStateProperties.SNOWY)) {
+            return state.setValue(BlockStateProperties.SNOWY, false);
+        }
+        return state;
+    }
+
     @SubscribeEvent
     public static void onLevelTickPost(LevelTickEvent.Post event) {
         if (event.getLevel().isClientSide()) return;
         if (event.getLevel() instanceof ServerLevel serverLevel) {
-            // 當前 Tick 所有方塊都放置完畢後，統一執行形狀與鄰近更新
             RestoreUpdateQueue.flush(serverLevel);
+            // 每一 Tick 結算所有剛放下的方塊
+            PendingPlacementTracker.tick(serverLevel);
         }
+    }
+
+    /**
+     * 全生物通用放置監聽：
+     * 不排除安德、不排除任何模組怪。
+     * 直接將事件登記進延遲驗證佇列，等待世界 setBlock 落地後以實體狀態為準。
+     */
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onEntityPlaceBlock(BlockEvent.EntityPlaceEvent event) {
+        if (event.isCanceled() || !ModConfig.ENABLED.get()) return;
+        if (event.getLevel().isClientSide() || !(event.getLevel() instanceof ServerLevel serverLevel)) return;
+        if (!serverLevel.getGameRules().getBoolean(GameRules.RULE_MOBGRIEFING)) return;
+
+        Entity placer = event.getEntity();
+        if (!EntityRestoreFilter.shouldRestoreFor(placer)) return;
+
+        BlockPos eventPos = event.getPos();
+        BlockState placedState = event.getPlacedBlock();
+
+        LOGGER.info("[BR] 捕捉到生物放置意圖: 實體={}, 報告座標={}, 報告方塊={}", 
+                placer.getType().getDescription().getString(), eventPos, placedState);
+
+        // 將事件登記進追蹤佇列，交由 Tick 結算真實落子格
+        PendingPlacementTracker.enqueue(serverLevel, eventPos, placedState);
     }
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
@@ -126,20 +152,11 @@ public class ModBlockEvents {
         Entity indirect = event.getExplosion().getIndirectSourceEntity();
         Entity source = indirect != null ? indirect : direct;
 
-        boolean isMonster = source instanceof Monster;
-        boolean isMob = source instanceof Mob && !(source instanceof Player);
-        boolean isDragon = source instanceof EnderDragon;
-        boolean isCrystal = direct instanceof EndCrystal || indirect instanceof EndCrystal;
-
-        boolean allowRestore = false;
-        if (isDragon) {
-            allowRestore = ModConfig.INCLUDE_ENDER_DRAGON.get();
-        } else if (isCrystal) {
-            allowRestore = ModConfig.INCLUDE_END_CRYSTAL.get();
-        } else if (isMonster) {
-            allowRestore = true;
-        } else if (isMob && ModConfig.ALLOW_NON_MONSTERS.get()) {
-            allowRestore = true;
+        boolean allowRestore;
+        if (source instanceof PrimedTnt tnt) {
+            allowRestore = EntityRestoreFilter.shouldRestoreForTnt(tnt);
+        } else {
+            allowRestore = EntityRestoreFilter.shouldRestoreFor(source);
         }
 
         if (!allowRestore) return;
@@ -165,10 +182,11 @@ public class ModBlockEvents {
             BlockState state = level.getBlockState(pos);
             if (isNonRestorable(state)) continue;
 
+            BlockState cleanState = sanitizeStateForCapture(state);
             ContainerHelper.BlockDataSnapshot snapshot = ContainerHelper.captureAndClearBlockEntity(level, pos);
             CompoundTag tileTag = snapshot != null ? snapshot.nbt() : null;
 
-            toRestoreList.add(new PendingRestore(pos.immutable(), state, tileTag));
+            toRestoreList.add(new PendingRestore(pos.immutable(), cleanState, tileTag));
             it.remove();
         }
 
@@ -177,8 +195,6 @@ public class ModBlockEvents {
                     level, entry.pos(), entry.state(), entry.tag(), restoreDelay, GhostType.RESTORE
             );
             level.addFreshEntity(ghost);
-
-            // Flag 18 靜默轉為空氣
             level.setBlock(entry.pos(), Blocks.AIR.defaultBlockState(), 18);
 
             AABB clearBox = new AABB(entry.pos()).inflate(0.5);

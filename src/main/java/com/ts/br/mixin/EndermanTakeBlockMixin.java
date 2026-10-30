@@ -5,6 +5,7 @@ import com.ts.br.config.ModConfig;
 import com.ts.br.entity.GhostBlockEntity;
 import com.ts.br.event.ModBlockEvents;
 import com.ts.br.util.ContainerHelper;
+import com.ts.br.util.EntityRestoreFilter;
 import com.ts.br.util.GhostBlockTracker;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -31,31 +32,35 @@ public abstract class EndermanTakeBlockMixin {
             target = "Lnet/minecraft/world/level/Level;removeBlock(Lnet/minecraft/core/BlockPos;Z)Z"
         )
     )
-    private boolean br$interceptEndermanRemoveBlock(Level level, BlockPos pos, boolean isMoving) {
+    private boolean br$interceptEndermanTakeBlock(Level level, BlockPos pos, boolean isMoving) {
         if (ModConfig.ENABLED.get() && level instanceof ServerLevel serverLevel) {
             if (serverLevel.getGameRules().getBoolean(GameRules.RULE_MOBGRIEFING)) {
 
-                if (GhostBlockTracker.isDisappearBlock(pos)) {
-                    GhostBlockEntity ghost = GhostBlockTracker.getEntity(pos);
-                    if (ghost != null && !ghost.isRemoved()) {
-                        ghost.discard();
-                    }
-                    GhostBlockTracker.unregister(pos);
-                } else {
-                    BlockState state = serverLevel.getBlockState(pos);
-                    if (!state.isAir() && !ModBlockEvents.isNonRestorable(state)) {
-                        // 修正：從 BlockDataSnapshot 提取 nbt
-                        ContainerHelper.BlockDataSnapshot snapshot = ContainerHelper.captureAndClearBlockEntity(serverLevel, pos);
-                        CompoundTag tileTag = snapshot != null ? snapshot.nbt() : null;
+                if (EntityRestoreFilter.shouldRestoreFor(this.enderman)) {
+                    // 若安德搬走的是怪物放的暫態方塊，直接註銷實體
+                    if (GhostBlockTracker.isDisappearBlock(pos)) {
+                        GhostBlockEntity ghost = GhostBlockTracker.getEntity(pos);
+                        if (ghost != null && !ghost.isRemoved()) {
+                            ghost.discard();
+                        }
+                        GhostBlockTracker.unregister(pos);
+                    } else {
+                        BlockState state = serverLevel.getBlockState(pos);
+                        if (!ModBlockEvents.isNonRestorable(state)) {
+                            // 錄入時直接去掉 SNOWY 狀態
+                            BlockState cleanState = ModBlockEvents.sanitizeStateForCapture(state);
 
-                        int restoreDelay = ModConfig.RESTORE_DELAY_TICKS.get();
-                        GhostBlockEntity ghost = new GhostBlockEntity(serverLevel, pos, state, tileTag, restoreDelay, GhostType.RESTORE);
-                        serverLevel.addFreshEntity(ghost);
+                            ContainerHelper.BlockDataSnapshot snapshot = ContainerHelper.captureAndClearBlockEntity(serverLevel, pos);
+                            CompoundTag tileTag = snapshot != null ? snapshot.nbt() : null;
+
+                            int restoreDelay = ModConfig.RESTORE_DELAY_TICKS.get();
+                            GhostBlockEntity ghost = new GhostBlockEntity(serverLevel, pos, cleanState, tileTag, restoreDelay, GhostType.RESTORE);
+                            serverLevel.addFreshEntity(ghost);
+                        }
                     }
                 }
             }
         }
-
         return level.removeBlock(pos, isMoving);
     }
 }

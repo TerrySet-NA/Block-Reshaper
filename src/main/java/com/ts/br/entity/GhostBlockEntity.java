@@ -18,7 +18,6 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.RelativeMovement;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
@@ -53,6 +52,10 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
     private static final EntityDataAccessor<String> DATA_GHOST_TYPE =
             SynchedEntityData.defineId(GhostBlockEntity.class, EntityDataSerializers.STRING);
 
+    // 核心新增：透過 SynchedEntityData 保持客戶端與伺服端 targetPos 100% 絕對精確對齊
+    private static final EntityDataAccessor<BlockPos> DATA_TARGET_POS =
+            SynchedEntityData.defineId(GhostBlockEntity.class, EntityDataSerializers.BLOCK_POS);
+
     private BlockPos targetPos = BlockPos.ZERO;
     private CompoundTag originalTileTag = null;
 
@@ -79,6 +82,7 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
 
         this.entityData.set(DATA_SPAWN_TIME, now);
         this.entityData.set(DATA_DEATH_TIME, initialDeathTime);
+        this.entityData.set(DATA_TARGET_POS, this.targetPos);
 
         MapColor mapColor = state.getMapColor(level, pos);
         int resolvedColor = 0xFFFFFF;
@@ -102,13 +106,20 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
         builder.define(DATA_ORIGINAL_STATE, Blocks.AIR.defaultBlockState());
         builder.define(DATA_TINT_COLOR, 0xFFFFFF);
         builder.define(DATA_GHOST_TYPE, GhostType.RESTORE.getSerializedName());
+        builder.define(DATA_TARGET_POS, BlockPos.ZERO);
     }
 
     public BlockPos getTargetPos() {
-        if (this.targetPos == null || this.targetPos.equals(BlockPos.ZERO)) {
-            return this.blockPosition();
+        if (this.targetPos != null && !this.targetPos.equals(BlockPos.ZERO)) {
+            return this.targetPos;
         }
-        return this.targetPos;
+        BlockPos synchedPos = this.entityData.get(DATA_TARGET_POS);
+        if (synchedPos != null && !synchedPos.equals(BlockPos.ZERO)) {
+            this.targetPos = synchedPos;
+            return this.targetPos;
+        }
+        // 核心安全修復：加入 +0.1D 浮點補償，避免 blockPosition() 在整數邊界下沉抓到下方地基方塊
+        return BlockPos.containing(this.getX(), this.getY() + 0.1D, this.getZ());
     }
 
     public BlockState getOriginalState() {
@@ -217,7 +228,7 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
             int bufferDelay = ModConfig.BUFFER_DELAY_TICKS.get();
             int endHoldTicks = ModConfig.END_HOLD_TICKS.get();
 
-            // 1. 消失型（終界使者放下方塊）：在主流程開始 bufferDelay ticks 後抹除真方塊
+            // 1. 消失型（終界使者/生物放下方塊）：在主流程開始 bufferDelay ticks 後抹除真方塊
             if (this.getGhostType() == GhostType.DISAPPEAR) {
                 if (now >= (mainStartTime + bufferDelay) && !this.hasRemovedForDisappear) {
                     this.removeBlockForDisappear();
@@ -249,10 +260,15 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
         Level level = this.level();
         BlockState current = level.getBlockState(pos);
 
-        if (!current.isAir() && current.is(this.getOriginalState().getBlock())) {
+        System.out.println("[BR-Debug] 觸發消除！targetPos=" + pos + ", 當前方塊=" + current + ", 幽靈記錄=" + this.getOriginalState());
+
+        // 只要不是空氣就抹除（防止因 BlockState 屬性微小差異導致比對失敗）
+        if (!current.isAir()) {
             level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
             level.updateNeighborsAt(pos, Blocks.AIR);
+            System.out.println("[BR-Debug] 已成功抹除目標座標方塊！");
         }
+        GhostBlockTracker.unregister(pos);
     }
 
     /**
@@ -269,8 +285,7 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
         BlockState toRestore = this.getOriginalState();
 
         // 1. 如果現場不是空氣，且不是原本要放回的方塊（被玩家放了方塊或長出植物）
-        if (!currentState.isAir() && !currentState.equals(toRestore)) {
-            // 直接以原版標準邏輯打碎現場障礙方塊並掉落（如果是箱子/背包，原版會自己把肚子裡的東西吐出來）
+        if (!currentState.isAir()) {
             serverLevel.destroyBlock(pos, true);
         }
 
@@ -283,10 +298,17 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
             toRestore = toRestore.setValue(BlockStateProperties.WATERLOGGED, hasWater || toRestore.getValue(BlockStateProperties.WATERLOGGED));
         }
 
-        // 4. 靜默放回原始方塊 (Flag 18 = UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE)
+        // 4. 僅需檢查現場上方是否確實有雪，有的話才動態啟用 SNOWY（其餘情況錄入時已保證為 false）
+        if (toRestore.hasProperty(BlockStateProperties.SNOWY)) {
+            if (level.getBlockState(pos.above()).is(Blocks.SNOW)) {
+                toRestore = toRestore.setValue(BlockStateProperties.SNOWY, true);
+            }
+        }
+
+        // 5. 靜默放回原始方塊 (Flag 18 = UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE)
         level.setBlock(pos, toRestore, 18);
 
-        // 5. 完整注入原本所有的方塊資料（NBT + 1.21 組件），精妙背包在這裡被完整喚醒！
+        // 5. 完整注入原本所有的方塊資料（NBT + 1.21 組件）
         if (this.originalTileTag != null) {
             BlockEntity be = level.getBlockEntity(pos);
             if (be != null) {
@@ -299,7 +321,7 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
             level.scheduleTick(pos, Fluids.WATER, Fluids.WATER.getTickDelay(level));
         }
 
-        // 6. 排入 Tick 尾端統一連通更新（大箱子、階梯轉角等在此刻自動對齊）
+        // 6. 排入 Tick 尾端統一連通更新
         RestoreUpdateQueue.enqueue(serverLevel, pos);
     }
 
@@ -348,6 +370,7 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
 
         if (tag.contains("TargetPos")) {
             this.targetPos = NbtUtils.readBlockPos(tag, "TargetPos").orElse(this.blockPosition());
+            this.entityData.set(DATA_TARGET_POS, this.targetPos);
         }
         if (tag.contains("OriginalTileTag")) {
             this.originalTileTag = tag.getCompound("OriginalTileTag");
@@ -405,22 +428,14 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
 
     @Override
     public void moveTo(double x, double y, double z, float yRot, float xRot) {
-        if (this.targetPos != null && !this.targetPos.equals(BlockPos.ZERO)) {
-            BlockPos pos = this.targetPos;
-            super.moveTo(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, 0.0F, 0.0F);
-        } else {
-            super.moveTo(x, y, z, yRot, xRot);
-        }
+        BlockPos pos = this.getTargetPos();
+        super.moveTo(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, 0.0F, 0.0F);
     }
 
     @Override
     public void setPos(double x, double y, double z) {
-        if (this.targetPos != null && !this.targetPos.equals(BlockPos.ZERO)) {
-            BlockPos pos = this.targetPos;
-            super.setPos(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
-        } else {
-            super.setPos(x, y, z);
-        }
+        BlockPos pos = this.getTargetPos();
+        super.setPos(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
     }
 
     @Override public void push(Entity entity) {}

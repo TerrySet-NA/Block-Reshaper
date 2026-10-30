@@ -4,10 +4,10 @@
   "package": "com.ts.br.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-    "EndermanTakeBlockMixin", 
-    "EndermanLeaveBlockMixin", 
     "EndermanDeathMixin", 
-    "UniversalMonsterGriefMixin"
+    "UniversalMonsterGriefMixin", 
+    "EndermanTakeBlockMixin", 
+    "EndermanFixPlaceMixin"
   ],
   "client": [],
   "injectors": {
