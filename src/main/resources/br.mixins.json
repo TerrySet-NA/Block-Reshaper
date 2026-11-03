@@ -7,7 +7,9 @@
     "EndermanDeathMixin", 
     "UniversalMonsterGriefMixin", 
     "EndermanTakeBlockMixin", 
-    "EndermanFixPlaceMixin"
+    "EndermanFixPlaceMixin", 
+    "DisappearBlockDropMixin", 
+    "LevelDestroyBlockMixin"
   ],
   "client": [],
   "injectors": {

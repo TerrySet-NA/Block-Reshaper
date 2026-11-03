@@ -413,6 +413,15 @@ public class GhostBlockEntity extends Entity implements IAnimatableState {
     @Override public boolean canUsePortal(boolean allowVehicles) { return false; }
     @Override public Entity changeDimension(net.minecraft.world.level.portal.DimensionTransition transition) { return null; }
 
+    /**
+     * 不阻礙方塊放置與結構判定
+     */
+    @Override
+    protected AABB makeBoundingBox() {
+        // 將 AABB 壓縮為單點，徹底避免任何範圍偵測與重疊判定命中
+        return new AABB(this.getX(), this.getY(), this.getZ(), this.getX(), this.getY(), this.getZ());
+    }
+
     @Override
     public void teleportTo(double x, double y, double z) {
         BlockPos pos = this.getTargetPos();
