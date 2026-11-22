@@ -9,7 +9,10 @@
     "EndermanTakeBlockMixin", 
     "EndermanFixPlaceMixin", 
     "DisappearBlockDropMixin", 
-    "LevelDestroyBlockMixin"
+    "LevelGetBlockStateMixin",
+    "DisappearBlockPushReactionMixin", 
+    "StructureTemplateMixin", 
+    "DynamicNonMovableTagMixin"
   ],
   "client": [],
   "injectors": {
